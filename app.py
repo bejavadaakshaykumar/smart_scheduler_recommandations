@@ -15,6 +15,7 @@ Run with:   streamlit run app.py
 from __future__ import annotations
 
 import hashlib
+import json
 
 import numpy as np
 import pandas as pd
@@ -40,7 +41,20 @@ from sklearn.metrics import (
 # Constants
 # --------------------------------------------------------------------------- #
 SCHEDULERS = ["FIFO", "EDF", "ML-EDF"]
-COLORS = {"FIFO": "#8d99ae", "EDF": "#2b6cb0", "ML-EDF": "#d9480f"}
+COLORS = {"FIFO": "#64748B", "EDF": "#2563EB", "ML-EDF": "#7C3AED"}
+INK, MUTED, LINE = "#14213D", "#5A6785", "#E2E8F2"
+GOOD, BAD, IDLE_C, SWITCH_C = "#1F9D63", "#E5484D", "#CBD5E1", "#F59F00"
+DEFS = {
+    "FIFO": "First come, first served. It ignores deadlines.",
+    "EDF": "Always runs the task whose deadline is nearest.",
+    "ML-EDF": "EDF plus machine-learning guesses of run time and lateness risk.",
+}
+SCENARIOS = {
+    "Relaxed": ("Light", "Tasks arrive slowly and deadlines are generous. Most schedulers cope."),
+    "Busy": ("Moderate", "The processor stays busy and deadlines are tight."),
+    "Overloaded": ("Overloaded", "More work arrives than fits, so some deadlines must be missed."),
+}
+SCENARIO_OF = {v[0]: k for k, v in SCENARIOS.items()}
 
 # Task types are workload LABELS. IO tasks are NOT simulated as blocking on I/O.
 TASK_TYPES = ["CPU", "IO", "PERIODIC", "APERIODIC"]
@@ -667,7 +681,22 @@ def prediction_analysis(work, results, risk_weight, variant) -> pd.DataFrame:
 # --------------------------------------------------------------------------- #
 # Plots and result helpers
 # --------------------------------------------------------------------------- #
-def gantt_figure(res: SimResult, title: str, t_lo: int, t_hi: int) -> go.Figure:
+def style_fig(fig: go.Figure, height: int | None = None) -> go.Figure:
+    fig.update_layout(
+        font=dict(family="Manrope, system-ui, sans-serif", color=INK, size=13),
+        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+        margin=dict(l=10, r=10, t=50, b=10),
+        legend=dict(orientation="h", y=-0.18, font=dict(size=12)),
+        title=dict(font=dict(size=15, color=INK)),
+    )
+    fig.update_xaxes(gridcolor=LINE, zeroline=False, linecolor=LINE)
+    fig.update_yaxes(gridcolor=LINE, zeroline=False, linecolor=LINE)
+    if height:
+        fig.update_layout(height=height)
+    return fig
+
+
+def gantt_figure(res: SimResult, title: str, t_lo: int, t_hi: int, color: str = INK) -> go.Figure:
     tr = res.trace
     tr = tr[(tr["end_time"] > t_lo) & (tr["start_time"] < t_hi)]
     tk = res.tasks.set_index("task_id")
@@ -679,37 +708,37 @@ def gantt_figure(res: SimResult, title: str, t_lo: int, t_hi: int) -> go.Figure:
 
     fig = go.Figure()
 
-    def bars(part, labels, name, color):
+    def bars(part, labels, name, col):
         if len(part) == 0:
             return
         fig.add_trace(go.Bar(
             x=part["end_time"] - part["start_time"], base=part["start_time"], y=labels,
-            orientation="h", name=name, marker_color=color,
+            orientation="h", name=name, marker_color=col, marker_line_width=0,
             customdata=np.c_[part["start_time"], part["end_time"]],
-            hovertemplate="%{y}<br>%{customdata[0]} to %{customdata[1]}<extra></extra>",
+            hovertemplate="%{y}<br>time %{customdata[0]} to %{customdata[1]}<extra></extra>",
         ))
 
-    bars(run[~missed], run_labels[~missed], "Run (on time)", "#2f9e44")
-    bars(run[missed], run_labels[missed], "Run (task misses deadline)", "#e03131")
-    bars(idle, pd.Series("IDLE", index=idle.index), "Idle", "#adb5bd")
-    bars(csw, pd.Series("CONTEXT SWITCH", index=csw.index), "Context switch", "#f08c00")
+    bars(run[~missed], run_labels[~missed], "Running, will finish on time", GOOD)
+    bars(run[missed], run_labels[missed], "Running, will finish late", BAD)
+    bars(idle, pd.Series("IDLE", index=idle.index), "Processor idle", IDLE_C)
+    bars(csw, pd.Series("SWITCHING", index=csw.index), "Switching tasks", SWITCH_C)
 
-    rows = (["IDLE"] if len(idle) else []) + (["CONTEXT SWITCH"] if len(csw) else []) + list(dict.fromkeys(run_labels))
+    rows = (["IDLE"] if len(idle) else []) + (["SWITCHING"] if len(csw) else []) + list(dict.fromkeys(run_labels))
     ids = run["task_id"].drop_duplicates()
     dls = ids.map(tk["deadline"])
     keep = (dls >= t_lo) & (dls <= t_hi)
     if keep.any():
         fig.add_trace(go.Scatter(
             x=dls[keep], y="Task " + ids[keep].astype(str), mode="markers", name="Deadline",
-            marker=dict(symbol="diamond", size=8, color="#1c1c1c"),
+            marker=dict(symbol="diamond", size=9, color=INK, line=dict(color="white", width=1)),
             hovertemplate="%{y}<br>deadline %{x}<extra></extra>",
         ))
+    style_fig(fig)
     fig.update_layout(
-        title=title, barmode="overlay", xaxis_title="Virtual time", yaxis_title="Task",
-        xaxis=dict(range=[t_lo, t_hi]),
-        yaxis=dict(type="category", categoryorder="array", categoryarray=rows, autorange="reversed"),
-        height=int(min(900, max(320, 20 * len(rows) + 150))),
-        margin=dict(l=10, r=10, t=50, b=10), legend=dict(orientation="h", y=-0.15),
+        title=dict(text=title, font=dict(size=16, color=color)), barmode="overlay",
+        xaxis=dict(range=[t_lo, t_hi], title="Time", gridcolor=LINE),
+        yaxis=dict(type="category", categoryorder="array", categoryarray=rows, autorange="reversed", title=None),
+        height=int(min(900, max(300, 20 * len(rows) + 150))), bargap=0.25,
     )
     return fig
 
@@ -946,169 +975,298 @@ def run_self_tests() -> pd.DataFrame:
 
 
 # --------------------------------------------------------------------------- #
-# Page --------------------------------------------------------------------- #
-st.set_page_config(page_title="Real-Time Task Scheduler", layout="wide")
+# Interface: styling and small HTML builders
+# --------------------------------------------------------------------------- #
+CSS = """
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&display=swap');
+:root{--bg:#F5F7FB;--surface:#FFFFFF;--ink:#14213D;--muted:#5A6785;--line:#E2E8F2;
+--good:#1F9D63;--bad:#E5484D;--fifo:#64748B;--edf:#2563EB;--ml:#7C3AED;color-scheme:light}
+html,body,.stApp{background:var(--bg)!important;font-family:'Manrope',system-ui,-apple-system,'Segoe UI',sans-serif}
+:where(.stApp) :where(p,li,label,h1,h2,h3,h4,span,div){color:var(--ink);font-family:'Manrope',system-ui,sans-serif}
+:where(.stApp) :where(h1,h2,h3,h4){font-weight:800;letter-spacing:-0.02em}
+header[data-testid="stHeader"]{background:transparent}
+#MainMenu,footer{visibility:hidden}
+.block-container{padding-top:1.4rem;max-width:1180px}
+section[data-testid="stSidebar"]{background:#fff;border-right:1px solid var(--line)}
+section[data-testid="stSidebar"] .block-container{padding-top:1rem}
+[data-testid="stSlider"],[data-testid="stToggle"],[data-testid="stCheckbox"],[data-testid="stRadio"]{filter:hue-rotate(222deg) saturate(.8)}
+button[data-baseweb="tab"]{font-weight:700;color:var(--muted)}
+button[data-baseweb="tab"][aria-selected="true"]{color:var(--ink)}
+div[data-baseweb="tab-highlight"]{background:var(--ink)!important}
+.stButton>button,.stDownloadButton>button{border-radius:10px;border:1px solid var(--line);font-weight:700;background:#fff;color:var(--ink)}
+.stButton>button:hover,.stDownloadButton>button:hover{border-color:var(--ink);color:var(--ink)}
+.stButton>button[kind="primary"],button[data-testid="stBaseButton-primary"]{background:var(--ink);color:#fff;border-color:var(--ink)}
+[data-testid="stExpander"]{border:1px solid var(--line);border-radius:12px;background:#fff}
+[data-testid="stDataFrame"]{border:1px solid var(--line);border-radius:12px;overflow:hidden}
+
+.hero{background:linear-gradient(120deg,#0E1A44 0%,#1B2A7A 100%);border-radius:20px;padding:30px 34px 26px;margin-bottom:18px}
+.hero h1{color:#fff!important;font-size:2.15rem;line-height:1.15;margin:0 0 8px 0;max-width:720px}
+.hero p{color:#C9D3F5!important;font-size:1.02rem;line-height:1.55;margin:0 0 16px 0;max-width:680px}
+.pills{display:flex;flex-wrap:wrap;gap:8px}
+.pill{background:rgba(255,255,255,.12);color:#fff!important;border-radius:999px;padding:5px 12px;font-size:.82rem;font-weight:600}
+.pill.ok{background:#D6F5E6;color:#0B5D39!important}
+.pill.bad{background:#FFE0E0;color:#8E1B1B!important}
+
+.steps{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin:0 0 22px 0}
+.step{background:#fff;border:1px solid var(--line);border-radius:14px;padding:14px 16px;display:flex;gap:12px;align-items:flex-start}
+.step b{background:var(--ink);color:#fff!important;border-radius:50%;min-width:26px;height:26px;display:flex;align-items:center;justify-content:center;font-size:.85rem}
+.step span{font-size:.92rem;line-height:1.45;color:var(--ink)}
+
+.sc{background:#fff;border:1px solid var(--line);border-top:5px solid var(--c);border-radius:16px;padding:18px 20px 16px}
+.sc-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:4px}
+.sc-name{font-weight:800;font-size:1.15rem;color:var(--c)!important}
+.badge{background:var(--c);color:#fff!important;font-size:.72rem;font-weight:700;padding:3px 9px;border-radius:999px}
+.badge.tie{background:#E6EAF2;color:var(--muted)!important}
+.sc-def{color:var(--muted)!important;font-size:.85rem;line-height:1.4;min-height:2.4em}
+.sc-big{font-size:2.5rem;font-weight:800;letter-spacing:-0.03em;margin:10px 0 2px 0;line-height:1}
+.sc-big small{font-size:.95rem;font-weight:600;color:var(--muted)!important;letter-spacing:0}
+.sc-bar{height:8px;background:#EDF1F8;border-radius:99px;overflow:hidden;margin:10px 0 10px 0}
+.sc-bar i{display:block;height:100%;background:var(--c);border-radius:99px}
+.sc-foot{font-size:.86rem;color:var(--muted)!important}
+
+.panel{background:#fff;border:1px solid var(--line);border-radius:16px;padding:18px 20px;margin:6px 0 14px 0}
+.panel h4{margin:0 0 4px 0;font-size:1.02rem}
+.panel .sub{color:var(--muted)!important;font-size:.88rem;margin-bottom:12px}
+.strip{display:flex;gap:14px;align-items:flex-start;margin:8px 0}
+.strip-name{min-width:70px;font-weight:800;padding-top:1px}
+.cells{display:flex;flex-wrap:wrap}
+.cells i{display:inline-block;width:14px;height:14px;border-radius:4px;margin:0 3px 3px 0}
+.cells i.ok{background:var(--good)}
+.cells i.late{background:var(--bad);background-image:repeating-linear-gradient(135deg,rgba(255,255,255,.6) 0 2px,transparent 2px 5px)}
+.legend{display:flex;gap:18px;flex-wrap:wrap;font-size:.84rem;color:var(--muted);margin-top:10px}
+.legend i{display:inline-block;width:12px;height:12px;border-radius:3px;margin-right:6px;vertical-align:-1px}
+.insights{margin:0;padding-left:18px}
+.insights li{margin:6px 0;line-height:1.5}
+.brand{font-weight:800;font-size:1.25rem;letter-spacing:-0.02em;margin-bottom:2px}
+.brand-sub{color:var(--muted)!important;font-size:.82rem;margin-bottom:14px}
+.side-h{font-weight:800;font-size:.95rem;margin:16px 0 4px 0}
+.callout{border-left:4px solid var(--ink);background:#fff;border-radius:0 12px 12px 0;padding:12px 16px;margin:8px 0 14px 0;font-size:.93rem;line-height:1.5}
+.explain{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin:6px 0 14px 0}
+.explain div{background:#fff;border:1px solid var(--line);border-radius:14px;padding:14px 16px;font-size:.9rem;line-height:1.5}
+.explain b{display:block;margin-bottom:4px;font-size:.98rem}
+@media (max-width:760px){.steps,.explain{grid-template-columns:1fr}.hero h1{font-size:1.6rem}.hero{padding:22px}}
+</style>
+"""
+
+FRIENDLY_ROWS = [
+    ("on_time", "Tasks finished on time", "higher"),
+    ("deadline_misses", "Tasks finished late", "lower"),
+    ("avg_waiting_time", "Average waiting time", "lower"),
+    ("avg_response_time", "Average time until first run", "lower"),
+    ("avg_tardiness", "Average lateness", "lower"),
+    ("max_tardiness", "Worst lateness", "lower"),
+    ("preemptions", "Times a running task was interrupted", "none"),
+    ("context_switches", "Switches between tasks", "lower"),
+    ("cpu_utilization_pct", "Processor busy (%)", "none"),
+    ("total_simulation_time", "Time when the last task finished", "lower"),
+]
+
+
+def pills_html(items: list[str], verified: bool) -> str:
+    chips = "".join(f"<span class='pill'>{t}</span>" for t in items)
+    state = ("<span class='pill ok'>All integrity checks passed</span>" if verified
+             else "<span class='pill bad'>An integrity check failed, see Verify and learn</span>")
+    return f"<div class='pills'>{chips}{state}</div>"
+
+
+def hero_html(items: list[str], verified: bool) -> str:
+    return (
+        "<div class='hero'><h1>Which scheduler meets the most deadlines?</h1>"
+        "<p>The same set of tasks runs through three schedulers on one processor. "
+        "See who finishes on time, and what machine learning changes.</p>"
+        + pills_html(items, verified) + "</div>"
+    )
+
+
+def steps_html() -> str:
+    steps = [
+        "Tasks arrive, each with the time it needs and a deadline.",
+        "Each scheduler decides which task runs next. All three get the identical tasks.",
+        "Count the tasks that finished before their deadline. Most on time wins.",
+    ]
+    return "<div class='steps'>" + "".join(f"<div class='step'><b>{i}</b><span>{s}</span></div>"
+                                           for i, s in enumerate(steps, 1)) + "</div>"
+
+
+def scorecard_html(name: str, summary: dict, n: int, best: set, n_active: int) -> str:
+    late = summary["deadline_misses"]
+    on = n - late
+    pct = 100 * on / max(1, n)
+    if len(best) == n_active:
+        badge = "<span class='badge tie'>All tied</span>"
+    elif name in best:
+        badge = "<span class='badge'>Most on time</span>"
+    else:
+        badge = ""
+    return (
+        f"<div class='sc' style='--c:{COLORS[name]}'>"
+        f"<div class='sc-head'><span class='sc-name'>{name}</span>{badge}</div>"
+        f"<div class='sc-def'>{DEFS[name]}</div>"
+        f"<div class='sc-big'>{on}<small> of {n} on time</small></div>"
+        f"<div class='sc-bar'><i style='width:{pct:.1f}%'></i></div>"
+        f"<div class='sc-foot'>{late} late. Average wait {summary['avg_waiting_time']:.1f} time units.</div></div>"
+    )
+
+
+def strip_html(res: SimResult, name: str) -> str:
+    t = res.tasks.sort_values(["arrival_time", "task_id"])
+    cells = []
+    for tid, fin, dl, late in zip(t["task_id"], t["completion_time"], t["deadline"], t["deadline_missed"]):
+        state = "late" if late else "on time"
+        cells.append(f"<i class='{'late' if late else 'ok'}' title='Task {tid}: finished at {fin}, deadline {dl} ({state})'></i>")
+    return (f"<div class='strip'><div class='strip-name' style='color:{COLORS[name]}'>{name}</div>"
+            f"<div class='cells'>{''.join(cells)}</div></div>")
+
+
+def build_insights(table: pd.DataFrame, results: dict, n: int) -> list[str]:
+    out = []
+    misses = table["deadline_misses"].astype(int)
+    best_val = misses.min()
+    best = [s for s in table.index if misses[s] == best_val]
+    on = n - best_val
+    if len(best) == len(table):
+        out.append(f"All schedulers finished the same number of tasks on time: {on} of {n}.")
+    else:
+        out.append(f"<b>{' and '.join(best)}</b> met the most deadlines: {on} of {n} tasks on time ({100 * on / n:.0f}%).")
+    if "FIFO" in table.index and "EDF" in table.index:
+        d = int(misses["FIFO"] - misses["EDF"])
+        if d > 0:
+            out.append(f"EDF finished {d} more tasks on time than FIFO, because it looks at deadlines and FIFO does not.")
+        elif d < 0:
+            out.append(f"FIFO finished {-d} more tasks on time than EDF on this workload.")
+        else:
+            out.append("FIFO and EDF finished the same number of tasks on time on this workload.")
+    if "ML-EDF" in table.index and "EDF" in table.index:
+        d = int(misses["EDF"] - misses["ML-EDF"])
+        if d > 0:
+            out.append(f"ML-EDF beat EDF here by {d} task{'s' if d != 1 else ''}. Check the Is it luck? tab to see whether that repeats.")
+        elif d < 0:
+            out.append(f"ML-EDF finished {-d} fewer task{'s' if d != -1 else ''} on time than EDF on this workload.")
+        else:
+            out.append("ML-EDF and EDF finished the same number of tasks on time.")
+        pe, pm = int(table.loc["EDF", "preemptions"]), int(table.loc["ML-EDF", "preemptions"])
+        if pm >= 10 and pm > 2 * pe:
+            out.append(f"ML-EDF interrupted running tasks {pm} times against {pe} for EDF. "
+                       "Every switch can cost time, which is how a clever idea can lose to a simple one.")
+    out.append("This is one set of tasks. Open <b>Is it luck?</b> to repeat the test on many.")
+    return out
+
+
+def friendly_table(table: pd.DataFrame, n: int) -> pd.DataFrame:
+    t = table.copy()
+    t["on_time"] = n - t["deadline_misses"].astype(int)
+    return pd.DataFrame({label: t[key] for key, label, _ in FRIENDLY_ROWS}).T
+
+
+def styled_friendly(df: pd.DataFrame):
+    directions = {label: d for _, label, d in FRIENDLY_ROWS}
+
+    def hl(row):
+        d = directions[row.name]
+        if d == "none":
+            return [""] * len(row)
+        best = row.max() if d == "higher" else row.min()
+        return ["background-color:#DDF5E8;font-weight:700" if np.isclose(v, best) else "" for v in row]
+
+    def fmt(v):
+        v = float(v)
+        return f"{v:,.0f}" if v.is_integer() else f"{v:,.2f}"
+
+    try:
+        return df.style.apply(hl, axis=1).format(fmt)
+    except Exception:
+        return df
+
+
+def panel_open(title: str, sub: str = "") -> None:
+    st.markdown(f"<div class='panel'><h4>{title}</h4><div class='sub'>{sub}</div></div>", unsafe_allow_html=True)
+
+
+# --------------------------------------------------------------------------- #
+# Page
+# --------------------------------------------------------------------------- #
+st.set_page_config(page_title="Scheduler Lab: which scheduler meets the most deadlines?",
+                   layout="wide", initial_sidebar_state="expanded")
+st.markdown(CSS, unsafe_allow_html=True)
 st.session_state.setdefault("seed", 42)
+
 
 def _new_seed():
     st.session_state["seed"] = int(np.random.default_rng().integers(0, 1_000_000))
 
 
-# Quiet, consistent styling that keeps the data and controls easy to scan.
-st.markdown(
-    """
-    <style>
-    .stApp { background: #f6f7f8; color: #24323a; }
-    [data-testid="stSidebar"] { background: #eef2f3; border-right: 1px solid #dce3e5; }
-    .block-container { max-width: 1480px; padding-top: 1.6rem; padding-bottom: 2.5rem; }
-    h1, h2, h3 { color: #193b46; letter-spacing: -0.02em; }
-    h1 { font-weight: 650; }
-    [data-testid="stMetric"] {
-        background: #ffffff; border: 1px solid #e0e6e8; border-radius: 10px;
-        padding: 0.8rem 0.95rem; box-shadow: 0 1px 2px rgba(20, 45, 54, 0.04);
-    }
-    [data-testid="stMetricLabel"] { color: #586a70; }
-    [data-testid="stTabs"] button { color: #39555d; }
-    [data-testid="stTabs"] button[aria-selected="true"] {
-        color: #176b61; border-bottom-color: #176b61;
-    }
-    div[data-testid="stAlert"] { border-radius: 9px; }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
-
-st.markdown(
-    '<div style="color:#24766d;font-size:.76rem;font-weight:700;letter-spacing:.11em;'
-    'text-transform:uppercase;margin-bottom:.25rem">SCHEDULER LAB · SIMULATION WORKSPACE</div>',
-    unsafe_allow_html=True,
-)
-st.title("Real-Time Task Scheduler")
-st.caption(
-    "See how different rules decide which task runs next. Create a sample workload or upload your own, "
-    "then compare FIFO, EDF and ML-EDF on the same tasks."
-)
-st.info(
-    "This is a virtual single-CPU simulation. It helps explain scheduling behavior; it does not control "
-    "a real computer or RTOS."
-)
-
-# ---- Setup ----------------------------------------------------------------- #
+# ---- Sidebar --------------------------------------------------------------- #
 with st.sidebar:
-    st.markdown("### Set up a run")
-    st.caption("Choose the tasks and scheduling conditions for this comparison.")
+    st.markdown("<div class='brand'>Scheduler Lab</div>"
+                "<div class='brand-sub'>Compare how tasks get scheduled</div>", unsafe_allow_html=True)
 
-    st.markdown("**1 · Workload**")
-    source = st.radio(
-        "Choose task data",
-        ["Generate", "Upload CSV"],
-        horizontal=True,
-        format_func=lambda value: "Create sample" if value == "Generate" else "Upload CSV",
-    )
-    upload = None
-    n_tasks, load, smin, smax, difficulty = 60, 0.85, 1.5, 3.0, "Moderate"
-    if source == "Generate":
-        n_tasks = st.slider("Tasks in this run", 10, 300, 60, step=10)
-        difficulty = st.selectbox(
-            "Workload intensity",
-            list(DIFFICULTY) + ["Custom"],
-            index=1,
-            help="Higher offered load means tasks arrive more quickly relative to the CPU's capacity.",
-        )
-        if difficulty == "Custom":
-            load = st.slider(
-                "Offered load",
-                0.3,
-                1.8,
-                0.85,
-                step=0.05,
-                help="At 1.0, tasks arrive about as quickly as the CPU can process them.",
-            )
-            smin, smax = st.slider(
-                "Deadline range",
-                1.0,
-                5.0,
-                (1.5, 3.0),
-                step=0.1,
-                help="The deadline is set from arrival time plus execution time multiplied by this factor.",
-            )
+    st.markdown("<div class='side-h'>1. Pick a scenario</div>", unsafe_allow_html=True)
+    scenario = st.radio("Scenario", list(SCENARIOS), index=1, label_visibility="collapsed")
+    st.caption(SCENARIOS[scenario][1])
+    n_tasks = st.slider("Number of tasks", 10, 300, 60, step=10)
+    st.button("Shuffle to a new set of tasks", on_click=_new_seed)
+
+    st.markdown("<div class='side-h'>2. Set the rules</div>", unsafe_allow_html=True)
+    preemptive = st.toggle("A more urgent task may interrupt the running one", value=True)
+
+    with st.expander("Advanced settings"):
+        source = st.radio("Where do tasks come from?", ["Generate", "Upload CSV"], horizontal=True)
+        upload = None
+        custom = False
+        load, smin, smax = DIFFICULTY[SCENARIOS[scenario][0]]
+        if source == "Generate":
+            custom = st.checkbox("Set load and deadlines by hand")
+            if custom:
+                load = st.slider("How busy the processor is", 0.3, 1.8, float(load), step=0.05,
+                                 help="1.0 means work arrives about as fast as it can be done.")
+                smin, smax = st.slider("Deadline room (min, max)", 1.0, 5.0, (float(smin), float(smax)), step=0.1,
+                                       help="deadline = arrival + run time x this number")
+            st.number_input("Random seed", 0, 1_000_000, key="seed",
+                            help="The same seed always gives the same tasks.")
         else:
-            load, smin, smax = DIFFICULTY[difficulty]
-            st.caption(f"Offered load {load}; deadline factor {smin}–{smax}.")
-        st.number_input("Random seed", 0, 1_000_000, key="seed")
-        st.button("Create a new random sample", on_click=_new_seed)
-    else:
-        upload = st.file_uploader("Choose a workload CSV", type="csv")
-        st.caption(
-            "Required columns: task_id, arrival_time, execution_time and deadline. "
-            "Priority, task_type and input_size are optional."
-        )
-
-    st.markdown("---")
-    st.markdown("**2 · Scheduling rules**")
-    preemptive = st.toggle(
-        "Allow task preemption",
-        value=True,
-        help="When enabled, a newly arrived task can pause the current task if its scheduling priority is higher.",
-    )
-    cs_cost = int(
-        st.number_input(
-            "Context-switch time",
-            0,
-            10,
-            0,
-            help="Extra virtual time used when the CPU changes from one task to another.",
-        )
-    )
-    ml_variant = st.selectbox(
-        "ML-EDF decision rule",
-        list(ML_VARIANTS),
-        format_func=lambda key: ML_VARIANTS[key],
-        help="Choose how ML-EDF combines predicted task length and deadline-miss risk.",
-    )
-    risk_weight = st.slider(
-        "Miss-risk weight",
-        0.0,
-        10.0,
-        2.0,
-        step=0.5,
-        help="How strongly ML-EDF uses its predicted chance of missing a deadline. Zero removes this risk term.",
-    )
-
-    with st.expander("Advanced · model training"):
-        st.caption("These settings control the synthetic examples used to train and evaluate the ML models.")
-        n_workloads = st.slider("Training workloads", 10, 80, 30, step=5)
-        tasks_per = st.slider("Tasks per training workload", 50, 300, 150, step=25)
-        n_estimators = st.slider("Trees in each model", 20, 300, 100, step=20)
+            upload = st.file_uploader("CSV file", type="csv")
+            st.caption("Needs: task_id, arrival_time, execution_time, deadline. "
+                       "Optional: priority, task_type, input_size. Whole numbers only.")
+        cs_cost = int(st.number_input("Cost of switching tasks (time units)", 0, 10, 0,
+                                      help="Time lost every time the processor changes task."))
+        ml_variant = st.selectbox("How ML-EDF ranks tasks", list(ML_VARIANTS), format_func=lambda k: ML_VARIANTS[k])
+        risk_weight = st.slider("How much ML-EDF trusts its lateness risk", 0.0, 10.0, 2.0, step=0.5,
+                                help="0 ignores the risk estimate completely.")
+        st.caption("Machine-learning training")
+        n_workloads = st.slider("Practice workloads", 10, 80, 30, step=5)
+        tasks_per = st.slider("Tasks per practice workload", 50, 300, 150, step=25)
+        n_estimators = st.slider("Trees per model", 20, 300, 100, step=20)
 
 # ---- Workload -------------------------------------------------------------- #
 seed = int(st.session_state["seed"])
 if source == "Generate":
     workload = generate_workload(n_tasks, load, smin, smax, seed)
-    workload_name = f"generated (seed {seed})"
+    workload_name = f"seed {seed}"
 else:
     if upload is None:
-        st.info("Choose a CSV file in the sidebar, or switch to Create sample.")
+        st.markdown(hero_html(["Waiting for your CSV file"], True), unsafe_allow_html=True)
+        st.info("Upload a CSV file in Advanced settings, or choose Generate to use random tasks.")
         st.stop()
     try:
         raw = pd.read_csv(upload)
     except Exception as exc:
-        st.error(f"Could not read the CSV file: {exc}")
+        st.error(f"The CSV file could not be read: {exc}")
         st.stop()
     workload, errs, warns = validate_workload(raw)
     for w_ in warns:
         st.warning(w_)
     if errs:
-        st.error("The uploaded workload needs attention:\n\n" + "\n".join(f"- {e}" for e in errs))
+        st.error("The uploaded tasks have problems. Fix these and upload again:\n\n" + "\n".join(f"- {e}" for e in errs))
         st.stop()
-    workload_name = "uploaded CSV"
+    workload_name = "your CSV"
 
-# ---- Models, predictions and simulations ---------------------------------- #
+# ---- Models, predictions, simulations -------------------------------------- #
 models = None
 try:
     models = train_models(n_workloads, tasks_per, n_estimators, seed, preemptive, cs_cost)
 except Exception as exc:
-    st.error(f"ML models could not be trained ({exc}). FIFO and EDF can still run; ML-EDF is unavailable.")
+    st.error(f"The machine-learning models could not be trained ({exc}). FIFO and EDF still run; ML-EDF is switched off.")
 
 active = SCHEDULERS if models else ["FIFO", "EDF"]
 repaired = 0
@@ -1116,7 +1274,7 @@ if models:
     try:
         work, repaired = add_predictions(workload, models)
     except Exception as exc:
-        st.error(f"Predictions failed ({exc}). ML-EDF is unavailable for this workload.")
+        st.error(f"Predictions failed ({exc}). ML-EDF is switched off for this workload.")
         models, active, work = None, ["FIFO", "EDF"], workload
 else:
     work = workload
@@ -1125,497 +1283,307 @@ results = run_schedulers(work, active, preemptive, cs_cost, risk_weight, ml_vari
 table = summary_table(results)
 checks = {s: validate_run(workload, results[s], cs_cost) for s in active}
 all_ok = all(c["passed"] for s in active for c in checks[s])
-
 fingerprints = {r.fingerprint for r in results.values()}
 same_workload = len(fingerprints) == 1
+n = len(workload)
+verified = all_ok and same_workload
 
-st.subheader("Your current run")
-m1, m2, m3, m4, m5 = st.columns(5)
-m1.metric("Tasks", len(workload))
-m2.metric("Scheduling mode", "Preemptive" if preemptive else "Non-preemptive")
-m3.metric("Switch time", f"{cs_cost} time units")
-m4.metric("Workload ID", next(iter(fingerprints)))
-m5.metric("Task data", workload_name)
-if all_ok and same_workload:
-    st.success("Ready to explore: every integrity check passed, and each scheduler received the same tasks.")
-else:
-    st.error("A simulation integrity check failed. Open Integrity & tests to review the details.")
+mode = "Interruptions allowed" if preemptive else "No interruptions"
+scenario_label = scenario if source == "Generate" else "Uploaded tasks"
+st.markdown(hero_html([f"{scenario_label} scenario", f"{n} tasks", mode,
+                       f"Task set {next(iter(fingerprints))}"], verified), unsafe_allow_html=True)
+st.markdown(steps_html(), unsafe_allow_html=True)
 if repaired:
-    st.warning(f"{repaired} invalid model prediction value(s) were replaced with safe fallbacks.")
+    st.warning(f"{repaired} unusable machine-learning prediction(s) were replaced with safe defaults.")
 
-tab_overview, tab_work, tab_time, tab_tasks, tab_ml, tab_exp, tab_checks, tab_guide = st.tabs(
-    ["Overview", "Workload", "Schedule timeline", "Task results", "ML model", "Experiments", "Integrity & tests", "How it works"]
+tab_res, tab_time, tab_tasks, tab_ml, tab_exp, tab_learn = st.tabs(
+    ["Results", "Timeline", "Tasks", "Machine learning", "Is it luck?", "Verify and learn"]
 )
 
-# ---- Overview -------------------------------------------------------------- #
-with tab_overview:
-    st.write("Start with missed deadlines and waiting time. The table and charts show the same run in more detail.")
-    st.markdown("#### Results by scheduling rule")
-    st.caption(
-        "FIFO follows arrival order · EDF gives priority to the closest deadline · "
-        "ML-EDF also uses model estimates."
-    )
+# ---- Results --------------------------------------------------------------- #
+with tab_res:
+    misses = table["deadline_misses"].astype(int)
+    best = {s for s in table.index if misses[s] == misses.min()}
     cols = st.columns(len(active))
-    for col, scheduler in zip(cols, active):
-        r = results[scheduler].summary
-        with col:
-            st.metric(
-                scheduler,
-                f"{r['deadline_misses']} missed",
-                f"{r['deadline_miss_rate_pct']}% of tasks · ends at {r['total_simulation_time']}",
-                delta_color="off",
-            )
+    for col, s in zip(cols, active):
+        col.markdown(scorecard_html(s, results[s].summary, n, best, len(active)), unsafe_allow_html=True)
 
-    st.markdown("#### Compare all reported measures")
-    comparison = table.rename(columns=LABELS).T
-    comparison.index.name = "Measure"
-    st.dataframe(comparison)
+    strips = "".join(strip_html(results[s], s) for s in active)
+    st.markdown(
+        "<div class='panel'><h4>Every task, one square each</h4>"
+        "<div class='sub'>Squares run in order of arrival. Hover a square for its details.</div>"
+        + strips +
+        "<div class='legend'><span><i style='background:#1F9D63'></i>Finished on time</span>"
+        "<span><i style='background:#E5484D;background-image:repeating-linear-gradient(135deg,rgba(255,255,255,.6) 0 2px,transparent 2px 5px)'></i>Finished late</span></div></div>",
+        unsafe_allow_html=True)
 
-    st.markdown("#### Which rule led on each measure?")
-    st.dataframe(best_by_metric(table), hide_index=True)
-    st.caption(
-        "This result describes one workload. A rule that leads here may not lead on another workload. "
-        "Use Experiments to compare across multiple sizes, difficulty levels and random seeds."
-    )
+    items = "".join(f"<li>{t}</li>" for t in build_insights(table, results, n))
+    st.markdown(f"<div class='panel'><h4>What happened</h4><ul class='insights'>{items}</ul></div>",
+                unsafe_allow_html=True)
 
-    chart_keys = [
-        "deadline_misses",
-        "avg_waiting_time",
-        "avg_turnaround_time",
-        "cpu_utilization_pct",
-        "throughput",
-        "context_switches",
-    ]
-    gcols = st.columns(3)
-    for i, key in enumerate(chart_keys):
-        fig = px.bar(
-            table.reset_index(),
-            x="scheduler",
-            y=key,
-            color="scheduler",
-            color_discrete_map=COLORS,
-            title=LABELS[key],
-        )
-        fig.update_layout(
-            showlegend=False,
-            height=300,
-            margin=dict(l=10, r=10, t=50, b=10),
-            xaxis_title=None,
-            yaxis_title=None,
-        )
-        gcols[i % 3].plotly_chart(fig, key=f"cmp_{key}")
+    st.markdown("#### Side by side")
+    st.dataframe(styled_friendly(friendly_table(table, n)), height=390)
+    st.caption("Green cells mark the best value in each row. Rows without colour have no better or worse direction. "
+               "No single number decides which scheduler is best.")
 
-# ---- Workload -------------------------------------------------------------- #
-with tab_work:
-    st.subheader("The task list used in this run")
-    st.write(
-        "Every scheduling rule received this same task list. Task ID is the label used in results and timelines."
-    )
-    shown = workload.copy()
-    shown.index.name = "row"
-    st.dataframe(shown)
-    st.download_button("Download task list (CSV)", workload.to_csv(index=False), "workload.csv", "text/csv")
-    st.caption(
-        f"Workload ID {next(iter(fingerprints))} is calculated from the task data. "
-        "It helps confirm that the scheduler results use the same workload."
-    )
+    with st.expander("See the numbers as charts"):
+        chart_keys = [("deadline_misses", "Tasks finished late"), ("avg_waiting_time", "Average waiting time"),
+                      ("avg_response_time", "Average time until first run"), ("context_switches", "Switches between tasks"),
+                      ("preemptions", "Interruptions"), ("cpu_utilization_pct", "Processor busy (%)")]
+        gcols = st.columns(3)
+        for i, (k, label) in enumerate(chart_keys):
+            fig = px.bar(table.reset_index(), x="scheduler", y=k, color="scheduler", color_discrete_map=COLORS, title=label)
+            style_fig(fig, 280).update_layout(showlegend=False, xaxis_title=None, yaxis_title=None)
+            gcols[i % 3].plotly_chart(fig, key=f"cmp_{k}")
+    with st.expander("All technical metrics"):
+        st.dataframe(table.rename(columns=LABELS).T)
 
-# ---- Timelines ------------------------------------------------------------- #
+# ---- Timeline -------------------------------------------------------------- #
 with tab_time:
-    st.subheader("When each task used the CPU")
+    st.markdown("<div class='callout'>Each bar is a task using the processor. "
+                "<b>Green</b> tasks finish on time, <b>red</b> tasks finish late, grey is idle time, "
+                "orange is time lost switching, and a diamond marks a deadline. "
+                "If a task appears in several pieces, it was interrupted.</div>", unsafe_allow_html=True)
     t_min = int(workload["arrival_time"].min())
     t_max = int(max(r.summary["total_simulation_time"] for r in results.values()))
-    t_lo, t_hi = st.slider("Show virtual time from–to", t_min, t_max, (t_min, min(t_max, t_min + 100)))
-    st.caption(
-        "Green bars finish by the deadline; red bars finish late. Diamonds show deadlines. "
-        "Gray sections mark idle time or a context switch."
-    )
-    for scheduler in active:
-        st.plotly_chart(
-            gantt_figure(
-                results[scheduler],
-                f"{scheduler} · finishes at time {results[scheduler].summary['total_simulation_time']}",
-                t_lo,
-                t_hi,
-            ),
-            key=f"gantt_{scheduler}",
-        )
-        order = (
-            results[scheduler]
-            .trace[results[scheduler].trace["event_type"] == "RUN"]
-            .drop_duplicates("task_id")["task_id"]
-            .tolist()
-        )
-        with st.expander(f"{scheduler} · task start order"):
-            st.code(" → ".join(str(value) for value in order))
+    t_lo, t_hi = st.slider("Zoom to a time window", t_min, t_max, (t_min, min(t_max, t_min + 100)))
+    for s in active:
+        st.plotly_chart(gantt_figure(results[s], f"{s}: last task finishes at time {results[s].summary['total_simulation_time']}",
+                                     t_lo, t_hi, COLORS[s]), key=f"gantt_{s}")
+        order = results[s].trace[results[s].trace["event_type"] == "RUN"].drop_duplicates("task_id")["task_id"].tolist()
+        with st.expander(f"{s}: the order tasks first ran in"):
+            st.code(" -> ".join(str(x) for x in order))
 
-# ---- Task results ---------------------------------------------------------- #
+# ---- Tasks ----------------------------------------------------------------- #
 with tab_tasks:
-    st.subheader("Look up task outcomes")
-    st.caption("Times use virtual time units. A task that finishes exactly at its deadline counts as on time.")
-    scheduler = st.selectbox("Choose a scheduling rule", active, key="task_sched")
-    only_missed = st.checkbox("Only show tasks that missed their deadline")
-    cols_ = [
-        "task_id",
-        "arrival_time",
-        "execution_time",
-        "pred_exec",
-        "miss_risk",
-        "deadline",
-        "start_time",
-        "completion_time",
-        "remaining_time",
-        "waiting_time",
-        "response_time",
-        "turnaround_time",
-        "tardiness",
-        "deadline_missed",
-    ]
-    detail = results[scheduler].tasks[[column for column in cols_ if column in results[scheduler].tasks.columns]].copy()
-    detail.index.name = "row"
-    for column in ("pred_exec", "miss_risk"):
-        if column in detail:
-            detail[column] = detail[column].round(3)
-    if only_missed:
-        detail = detail[detail["deadline_missed"]]
+    st.markdown("#### The tasks every scheduler received")
+    st.caption(f"Task set {next(iter(fingerprints))}. This code is a fingerprint of the table below, "
+               "and every result stores the fingerprint of the tasks it was given.")
+    shown = workload.rename(columns={
+        "task_id": "Task", "arrival_time": "Arrives at", "execution_time": "Needs (time units)",
+        "deadline": "Deadline", "priority": "Priority", "task_type": "Type", "input_size": "Input size"})
+    st.dataframe(shown, hide_index=True, height=300)
+    st.download_button("Download these tasks as CSV", workload.to_csv(index=False), "tasks.csv", "text/csv")
 
-    display_names = {
-        "task_id": "Task ID",
-        "arrival_time": "Arrives at",
-        "execution_time": "Actual length",
-        "pred_exec": "Predicted length",
-        "miss_risk": "Predicted miss chance",
-        "deadline": "Deadline",
-        "start_time": "First start",
-        "completion_time": "Finished at",
-        "remaining_time": "Remaining length",
-        "waiting_time": "Waiting",
-        "response_time": "Response",
-        "turnaround_time": "Turnaround",
-        "tardiness": "Time past deadline",
-        "deadline_missed": "Missed deadline",
-    }
-    st.dataframe(detail.rename(columns=display_names))
-    st.download_button("Download these task results (CSV)", detail.to_csv(), f"{scheduler}_tasks.csv", "text/csv")
-    with st.expander("View the raw execution trace"):
-        st.caption("The trace lists each run segment, idle interval and context switch in time order.")
-        st.dataframe(results[scheduler].trace)
+    st.markdown("#### What each scheduler did with them")
+    c1, c2 = st.columns([1, 1])
+    sched = c1.radio("Scheduler", active, horizontal=True, key="task_sched")
+    only_late = c2.checkbox("Show only late tasks")
+    d = results[sched].tasks.copy()
+    d["late_by"] = d["tardiness"]
+    d["result"] = np.where(d["deadline_missed"], "Late", "On time")
+    cols_ = {"task_id": "Task", "arrival_time": "Arrives", "execution_time": "Needed", "deadline": "Deadline",
+             "start_time": "Started", "completion_time": "Finished", "waiting_time": "Waited",
+             "late_by": "Late by", "result": "Result"}
+    if "pred_exec" in d:
+        d["pred_exec"] = d["pred_exec"].round(1)
+        d["risk_pct"] = (d["miss_risk"] * 100).round(0)
+        cols_.update({"pred_exec": "AI guess of run time", "risk_pct": "AI lateness risk (%)"})
+    view = d[list(cols_)].rename(columns=cols_)
+    if only_late:
+        view = view[view["Result"] == "Late"]
+    st.dataframe(view, hide_index=True, height=360)
+    st.download_button("Download these results as CSV", view.to_csv(index=False), f"{sched}_results.csv", "text/csv")
+    with st.expander("Raw execution trace"):
+        st.dataframe(results[sched].trace, hide_index=True)
 
-# ---- ML model -------------------------------------------------------------- #
+# ---- Machine learning ------------------------------------------------------ #
 with tab_ml:
     if models is None:
-        st.warning("The ML models are unavailable, so ML-EDF is not included in this run.")
+        st.warning("The machine-learning models are unavailable, so ML-EDF is switched off.")
     else:
-        st.subheader("How the ML estimates were evaluated")
-        st.write(
-            f"The models were trained on {models['train_rows']:,} tasks and evaluated on "
-            f"{models['test_rows']:,} held-out tasks from separate synthetic workloads. "
-            "The deadline-risk labels come from EDF simulations, so the classifier estimates risk under EDF, "
-            "not under ML-EDF. These scores show how well the models learned this synthetic task generator; "
-            "they are not a measure of real-world performance."
-        )
+        st.markdown(
+            "<div class='explain'>"
+            "<div><b>1. Learn from practice</b>Two models study many made-up workloads. One learns how long a task really runs. "
+            "The other learns which tasks end up late.</div>"
+            "<div><b>2. Guess for each task</b>For your tasks, the models guess the run time and the chance of being late. "
+            "The scheduler never sees the true run time.</div>"
+            "<div><b>3. Rank the tasks</b>ML-EDF mixes the guesses with each deadline to pick the next task. "
+            "FIFO and EDF ignore the guesses completely.</div></div>", unsafe_allow_html=True)
+
+        m, cm_ = models["reg_metrics"], models["clf_metrics"]
+        typical = float(workload["execution_time"].mean())
         a, b = st.columns(2)
         with a:
-            st.markdown("#### Task-length estimate")
-            st.caption("MAE is the average prediction error; RMSE gives larger errors extra weight; R² summarizes fit.")
-            m = models["reg_metrics"]
+            st.markdown("#### Guessing how long a task runs")
+            st.markdown(f"<div class='callout'>On practice tasks the models had never seen, the guess was off by "
+                        f"<b>{m['MAE']:.1f} time units</b> on average. A typical task here needs about {typical:.0f}, "
+                        f"so that is roughly {100 * m['MAE'] / max(typical, 1):.0f}% of a task. R2 = {m['R2']:.2f} (1.0 is perfect).</div>",
+                        unsafe_allow_html=True)
+            pa = prediction_analysis(work, results, risk_weight, ml_variant)
+            fig = px.scatter(pa, x="execution_time", y="pred_exec", opacity=0.65,
+                             labels={"execution_time": "Real run time", "pred_exec": "Guessed run time"},
+                             title="Your tasks: guess against reality")
+            fig.update_traces(marker=dict(color=COLORS["ML-EDF"], size=8))
+            top = float(pa["execution_time"].max())
+            fig.add_shape(type="line", x0=0, y0=0, x1=top, y1=top, line=dict(dash="dash", color="#94A3B8"))
+            st.plotly_chart(style_fig(fig, 320), key="ml_cur_scatter")
+            st.caption("Dots on the dashed line are perfect guesses.")
+        with b:
+            st.markdown("#### Guessing which tasks end up late")
+            if models["clf"] is None:
+                st.warning("The practice workloads never produced both outcomes, so no lateness model was trained "
+                           "and ML-EDF treats every task as equally safe.")
+            else:
+                auc = cm_.get("ROC-AUC")
+                if auc is not None:
+                    st.markdown(f"<div class='callout'>Shown a late task and an on-time task, the model rated the late "
+                                f"one as riskier <b>{auc * 100:.0f}% of the time</b> (50% would be a coin flip). "
+                                "That is useful but far from certain, so a risk score is a hint, not a promise.</div>",
+                                unsafe_allow_html=True)
+                if "missed_under_EDF" in pa:
+                    fig = px.box(pa.assign(outcome=np.where(pa["missed_under_EDF"], "Was late under EDF", "On time under EDF")),
+                                 x="outcome", y="miss_risk", points="all", color="outcome",
+                                 color_discrete_map={"Was late under EDF": BAD, "On time under EDF": GOOD},
+                                 labels={"miss_risk": "Predicted lateness risk", "outcome": ""},
+                                 title="Predicted risk against what happened under EDF")
+                    st.plotly_chart(style_fig(fig, 320).update_layout(showlegend=False), key="ml_cur_box")
+                    st.caption("Good risk scores put the red box above the green box.")
+
+        with st.expander("Technical scores and confusion matrix"):
             x1, x2, x3 = st.columns(3)
             x1.metric("MAE", f"{m['MAE']:.2f}")
             x2.metric("RMSE", f"{m['RMSE']:.2f}")
-            x3.metric("R²", f"{m['R2']:.3f}")
-            fig = px.scatter(
-                models["reg_test"],
-                x="actual",
-                y="predicted",
-                opacity=0.5,
-                title="Estimated length compared with actual length",
-            )
-            lim = float(models["reg_test"].max().max())
-            fig.add_shape(type="line", x0=0, y0=0, x1=lim, y1=lim, line=dict(dash="dash", color="#888"))
-            fig.update_layout(height=320, margin=dict(l=10, r=10, t=50, b=10))
-            st.plotly_chart(fig, key="ml_reg_test")
-            st.plotly_chart(
-                px.bar(models["reg_importance"].sort_values(), orientation="h", title="What influenced the estimate").update_layout(
-                    showlegend=False,
-                    height=220,
-                    margin=dict(l=10, r=10, t=50, b=10),
-                    xaxis_title=None,
-                    yaxis_title=None,
-                ),
-                key="ml_reg_imp",
-            )
-        with b:
-            st.markdown("#### Deadline-miss estimate")
-            if models["clf"] is None:
-                st.warning(
-                    "The training workloads had only one outcome (all tasks met or all missed their deadline). "
-                    "A classifier could not be trained, so ML-EDF uses a risk estimate of 0."
-                )
-            else:
-                cm_ = models["clf_metrics"]
+            x3.metric("R2", f"{m['R2']:.3f}")
+            if models["clf"] is not None:
                 mc = st.columns(4)
-                for i, (key, value) in enumerate(cm_.items()):
-                    mc[i % 4].metric(key, f"{value:.3f}")
-                st.caption(
-                    f"Tasks that missed under EDF: {models['train_miss_rate']:.1%} in training and "
-                    f"{models['test_miss_rate']:.1%} in testing. Accuracy can be misleading when one outcome is rare. "
-                    "Brier score reflects probability quality; accuracy checks the 0.5 cutoff."
-                )
-                fig = px.imshow(
-                    models["confusion"],
-                    text_auto=True,
-                    x=["Predicted on time", "Predicted missed"],
-                    y=["Actually on time", "Actually missed"],
-                    color_continuous_scale="Blues",
-                    title="Predictions compared with EDF outcomes (0.5 cutoff)",
-                )
-                fig.update_layout(height=320, coloraxis_showscale=False, margin=dict(l=10, r=10, t=50, b=10))
-                st.plotly_chart(fig, key="ml_cm")
-                st.plotly_chart(
-                    px.bar(
-                        models["clf_importance"].sort_values(),
-                        orientation="h",
-                        title="What influenced the risk estimate",
-                    ).update_layout(
-                        showlegend=False,
-                        height=220,
-                        margin=dict(l=10, r=10, t=50, b=10),
-                        xaxis_title=None,
-                        yaxis_title=None,
-                    ),
-                    key="ml_clf_imp",
-                )
-
-        st.markdown("#### Estimates for the current task list")
-        pa = prediction_analysis(work, results, risk_weight, ml_variant)
-        st.caption(
-            "These are estimates, not outcomes. A predicted miss chance is not a guarantee. "
-            "ML-EDF ranks a task using the selected decision rule; a smaller score means higher priority. "
-            + (
-                "Slack–risk uses (deadline − arrival − predicted remaining length) − weight × miss chance."
-                if ml_variant == "slack_risk"
-                else "Risk-adjusted deadline uses deadline − weight × miss chance × predicted length."
-            )
-        )
-        p1, p2 = st.columns(2)
-        fig = px.scatter(
-            pa,
-            x="execution_time",
-            y="pred_exec",
-            opacity=0.6,
-            title="Current tasks · actual and estimated length",
-        )
-        fig.add_shape(
-            type="line",
-            x0=0,
-            y0=0,
-            x1=float(pa["execution_time"].max()),
-            y1=float(pa["execution_time"].max()),
-            line=dict(dash="dash", color="#888"),
-        )
-        fig.update_layout(height=320, margin=dict(l=10, r=10, t=50, b=10))
-        p1.plotly_chart(fig, key="ml_cur_scatter")
-        if "missed_under_EDF" in pa:
-            fig = px.box(
-                pa,
-                x="missed_under_EDF",
-                y="miss_risk",
-                points="all",
-                title="Estimated miss chance vs. EDF outcome",
-            )
-            fig.update_layout(height=320, margin=dict(l=10, r=10, t=50, b=10))
-            p2.plotly_chart(fig, key="ml_cur_box")
-        st.dataframe(pa.round(3), hide_index=True)
-
-        import json
-        report = {
-            "regression": models["reg_metrics"],
-            "classifier": models["clf_metrics"],
-            "confusion_matrix": None if models["confusion"] is None else models["confusion"].tolist(),
-            "train_miss_rate": models["train_miss_rate"],
-            "test_miss_rate": models["test_miss_rate"],
-            "config": models["config"],
-        }
-        st.download_button(
-            "Download ML evaluation report (JSON)",
-            json.dumps(report, indent=2),
-            "ml_evaluation.json",
-            "application/json",
-        )
+                for i, (k, v) in enumerate(cm_.items()):
+                    mc[i % 4].metric(k, f"{v:.3f}")
+                cmx = models["confusion"]
+                st.dataframe(pd.DataFrame(cmx, index=["Actually on time", "Actually late"],
+                                          columns=["Predicted on time", "Predicted late"]))
+                st.caption(f"Share of practice tasks that ended late under EDF: train {models['train_miss_rate']:.0%}, "
+                           f"test {models['test_miss_rate']:.0%}. The labels come from simulating EDF, "
+                           "so the lateness model describes risk under EDF, not under ML-EDF. "
+                           "Everything here uses made-up tasks, so the scores say how well the models learned this "
+                           "generator, not how well they would do on real programs.")
+            st.dataframe(pa.round(3), hide_index=True)
+            report = {"regression": models["reg_metrics"], "classifier": models["clf_metrics"],
+                      "confusion_matrix": None if models["confusion"] is None else models["confusion"].tolist(),
+                      "train_miss_rate": models["train_miss_rate"], "test_miss_rate": models["test_miss_rate"],
+                      "config": models["config"]}
+            st.download_button("Download ML report (JSON)", json.dumps(report, indent=2),
+                               "ml_evaluation.json", "application/json")
 
 # ---- Experiments ----------------------------------------------------------- #
 with tab_exp:
-    st.subheader("Compare across many workloads")
-    st.write(
-        "Run each available scheduler on the same generated workloads at several sizes and difficulty levels. "
-        "The results include averages and variation across random seeds."
-    )
+    st.markdown("<div class='callout'>One set of tasks can flatter any scheduler. Here the same test runs on many "
+                "different sets, at several difficulty levels, so the result does not depend on luck.</div>",
+                unsafe_allow_html=True)
     e1, e2, e3 = st.columns(3)
-    sizes = e1.multiselect("Task-list sizes", [30, 60, 120, 200], default=[60])
-    levels = e2.multiselect("Workload intensities", list(DIFFICULTY), default=list(DIFFICULTY))
-    n_seeds = e3.slider("Random seeds per setting", 3, 30, 10)
-    if st.button("Run experiment", type="primary"):
+    sizes = e1.multiselect("Number of tasks", [30, 60, 120, 200], default=[60])
+    levels = e2.multiselect("Scenarios", list(SCENARIOS), default=list(SCENARIOS))
+    n_seeds = e3.slider("Task sets per setting", 3, 30, 10)
+    st.caption("Uses the rules from the sidebar: interruptions, switching cost and ML-EDF settings.")
+    if st.button("Run the experiment", type="primary"):
         if not sizes or not levels:
-            st.warning("Choose at least one task-list size and one workload intensity.")
+            st.warning("Pick at least one number of tasks and one scenario.")
         else:
             bar = st.progress(0.0)
-            raw_exp = run_experiment(
-                sizes,
-                levels,
-                n_seeds,
-                seed,
-                models,
-                preemptive,
-                cs_cost,
-                risk_weight,
-                ml_variant,
-                bar,
-            )
+            raw_exp = run_experiment(sizes, [SCENARIOS[x][0] for x in levels], n_seeds, seed, models, preemptive,
+                                     cs_cost, risk_weight, ml_variant, bar)
             bar.empty()
+            raw_exp["scenario"] = raw_exp["difficulty"].map(SCENARIO_OF)
             st.session_state["experiment"] = raw_exp
-            st.session_state["experiment_cfg"] = {
-                "preemptive": preemptive,
-                "cs_cost": cs_cost,
-                "ml_variant": ml_variant,
-                "risk_weight": risk_weight,
-                "base_seed": seed,
-            }
+            st.session_state["experiment_cfg"] = {"interruptions": preemptive, "switch_cost": cs_cost,
+                                                  "ml_formula": ml_variant, "risk_weight": risk_weight}
     exp = st.session_state.get("experiment")
-    if exp is not None:
-        st.caption(f"Settings used for this run: {st.session_state.get('experiment_cfg')}")
+    if exp is None:
+        st.info("Choose your settings and run the experiment. It takes a few seconds.")
+    else:
         if not exp["integrity_ok"].all():
             st.error(f"{int((~exp['integrity_ok']).sum())} simulation(s) failed integrity checks.")
-        keys = [
-            "deadline_misses",
-            "deadline_miss_rate_pct",
-            "avg_waiting_time",
-            "avg_turnaround_time",
-            "avg_response_time",
-            "cpu_utilization_pct",
-            "throughput",
-            "context_switches",
-            "preemptions",
-        ]
-        agg = exp.groupby(["tasks", "difficulty", "scheduler"])[keys].agg(["mean", "std"]).round(3)
-        agg.columns = [f"{a}_{b}" for a, b in agg.columns]
-        agg = agg.reset_index()
-        st.dataframe(agg, hide_index=True)
-
         if {"EDF", "ML-EDF"}.issubset(set(exp["scheduler"])):
-            piv = exp.pivot_table(
-                index=["tasks", "difficulty", "seed"],
-                columns="scheduler",
-                values="deadline_misses",
-            ).reset_index()
-            piv["ML-EDF fewer misses"] = (piv["ML-EDF"] < piv["EDF"]).astype(int)
-            piv["tie"] = (piv["ML-EDF"] == piv["EDF"]).astype(int)
-            piv["ML-EDF more misses"] = (piv["ML-EDF"] > piv["EDF"]).astype(int)
-            cmp_ = piv.groupby(["tasks", "difficulty"])[
-                ["ML-EDF fewer misses", "tie", "ML-EDF more misses"]
-            ].sum().reset_index()
-            st.markdown("#### ML-EDF compared with EDF, workload by workload")
-            st.dataframe(cmp_, hide_index=True)
-
-        pick = st.selectbox("Measure to chart", keys, format_func=lambda key: LABELS.get(key, key))
-        size_pick = st.selectbox("Task-list size", sorted(exp["tasks"].unique()))
+            piv = exp.pivot_table(index=["tasks", "scenario", "seed"], columns="scheduler",
+                                  values="deadline_misses").reset_index()
+            fewer, same, more = int((piv["ML-EDF"] < piv["EDF"]).sum()), int((piv["ML-EDF"] == piv["EDF"]).sum()), int((piv["ML-EDF"] > piv["EDF"]).sum())
+            st.markdown(f"<div class='panel'><h4>ML-EDF against EDF, task set by task set</h4>"
+                        f"<div class='sub'>{len(piv)} task sets compared</div>"
+                        f"<ul class='insights'><li>ML-EDF finished <b>more</b> tasks on time in <b>{fewer}</b></li>"
+                        f"<li>They finished the <b>same</b> number in <b>{same}</b></li>"
+                        f"<li>ML-EDF finished <b>fewer</b> tasks on time in <b>{more}</b></li></ul></div>",
+                        unsafe_allow_html=True)
+        metric_choice = st.radio("Show", ["Late tasks", "Average waiting time", "Interruptions"], horizontal=True)
+        col = {"Late tasks": "deadline_misses", "Average waiting time": "avg_waiting_time",
+               "Interruptions": "preemptions"}[metric_choice]
+        agg = exp.groupby(["tasks", "scenario", "scheduler"])[col].agg(["mean", "std"]).reset_index()
+        size_pick = st.selectbox("Number of tasks", sorted(exp["tasks"].unique()))
         sub = agg[agg["tasks"] == size_pick]
-        fig = px.bar(
-            sub,
-            x="difficulty",
-            y=f"{pick}_mean",
-            error_y=f"{pick}_std",
-            color="scheduler",
-            barmode="group",
-            color_discrete_map=COLORS,
-            category_orders={"difficulty": list(DIFFICULTY), "scheduler": SCHEDULERS},
-            title=f"{LABELS.get(pick, pick)} · average and standard deviation across seeds",
-        )
-        fig.update_layout(height=380, margin=dict(l=10, r=10, t=50, b=10))
-        st.plotly_chart(fig, key="exp_chart")
-        d1, d2, d3 = st.columns(3)
-        d1.download_button("Download summary (CSV)", agg.to_csv(index=False), "scheduler_comparison.csv", "text/csv")
-        d2.download_button("Download all results (CSV)", exp.to_csv(index=False), "experiment_raw.csv", "text/csv")
-        d3.download_button(
-            "Download all results (JSON)",
-            exp.to_json(orient="records", indent=2),
-            "experiment_raw.json",
-            "application/json",
-        )
-    else:
-        st.info("Choose the experiment settings, then select Run experiment.")
+        fig = px.bar(sub, x="scenario", y="mean", error_y="std", color="scheduler", barmode="group",
+                     color_discrete_map=COLORS, category_orders={"scenario": list(SCENARIOS), "scheduler": SCHEDULERS},
+                     labels={"mean": metric_choice, "scenario": ""},
+                     title=f"{metric_choice}, average over task sets (lower is better; whiskers show spread)")
+        st.plotly_chart(style_fig(fig, 380), key="exp_chart")
+        with st.expander("Full numbers and downloads"):
+            keys = ["deadline_misses", "avg_waiting_time", "avg_turnaround_time", "avg_response_time",
+                    "cpu_utilization_pct", "context_switches", "preemptions"]
+            full = exp.groupby(["tasks", "scenario", "scheduler"])[keys].agg(["mean", "std"]).round(3)
+            full.columns = [f"{a}_{b}" for a, b in full.columns]
+            full = full.reset_index()
+            st.dataframe(full, hide_index=True)
+            d1, d2, d3 = st.columns(3)
+            d1.download_button("Summary CSV", full.to_csv(index=False), "scheduler_comparison.csv", "text/csv")
+            d2.download_button("Raw CSV", exp.to_csv(index=False), "experiment_raw.csv", "text/csv")
+            d3.download_button("Raw JSON", exp.to_json(orient="records", indent=2), "experiment_raw.json", "application/json")
+            st.caption(f"Settings used: {st.session_state.get('experiment_cfg')}")
 
-# ---- Integrity & tests ----------------------------------------------------- #
-with tab_checks:
-    st.subheader("Checks on this simulation")
-    st.write(
-        "The app checks the execution trace for overlapping work, tasks starting before arrival, "
-        "execution time matching the task list, correct deadline flags and consistent total time."
-    )
-    for scheduler in active:
-        ck = pd.DataFrame(checks[scheduler])
+# ---- Verify and learn ------------------------------------------------------ #
+with tab_learn:
+    st.markdown("#### How to read this app")
+    st.markdown(
+        "<div class='explain'>"
+        "<div><b>FIFO</b>Runs tasks in the order they arrive, like a queue at a counter. Simple and fair, "
+        "but an urgent task can wait behind a relaxed one.</div>"
+        "<div><b>EDF</b>Earliest Deadline First. Whenever the processor is free it picks the task whose deadline is "
+        "closest. A strong classic for real-time systems.</div>"
+        "<div><b>ML-EDF</b>This project's idea. It adds machine-learning guesses of run time and lateness risk to the "
+        "deadline. Whether that helps is exactly what the app tests.</div></div>", unsafe_allow_html=True)
+    with st.expander("Words used in this app"):
+        st.markdown(
+            "- **Deadline**: the time by which a task must finish. Finishing exactly on it counts as on time.\n"
+            "- **Waiting time**: time from arrival to finish, minus the time the task actually needed.\n"
+            "- **Interruption (preemption)**: a running task is paused because a more urgent one arrived.\n"
+            "- **Switch cost**: time the processor loses each time it changes task. Set in Advanced settings.\n"
+            "- **Idle**: nothing was ready, so the processor waited for the next arrival.\n"
+            "- **Lateness**: how long after its deadline a task finished.")
+    with st.expander("How ML-EDF ranks tasks"):
+        st.markdown(
+            "Smaller score runs first. Ties fall back to the EDF order.\n\n"
+            "- **Original formula**: `(deadline - now - guessed remaining time) - w x risk`\n"
+            "- **Risk-adjusted deadline**: `deadline - w x risk x guessed run time`, which equals EDF when w is 0.\n\n"
+            "`w` is the slider named *How much ML-EDF trusts its lateness risk*. "
+            "The original formula behaves like Least Laxity First: the running task's score gets worse while it runs, "
+            "so waiting tasks keep overtaking it and interruptions can multiply. "
+            "The second formula keeps a task's score fixed while it runs.")
+    with st.expander("How the simulator counts things"):
+        st.markdown(
+            "- Time moves in whole steps on a virtual clock, on one processor.\n"
+            "- Arrivals are admitted before any decision at the same time.\n"
+            "- A switch happens when the processor runs a different task from the last one. "
+            "The first task and the first task after idle time are free.\n"
+            "- The real run time is always what a task uses. Guesses only affect ML-EDF's ranking.\n"
+            "- Processor busy (%) = running time divided by (end time minus first arrival).")
+    st.markdown("<div class='callout'><b>What this is not.</b> It is a simulator inspired by real-time operating systems. "
+                "No FreeRTOS or Zephyr is involved, no hardware is timed, IO tasks do not wait on devices and periodic "
+                "tasks do not repeat. A hardware demonstration would be a separate project phase.</div>",
+                unsafe_allow_html=True)
+
+    st.markdown("#### Can the numbers be trusted?")
+    st.caption("After every run the app re-checks each schedule using only its recorded trace.")
+    for s in active:
+        ck = pd.DataFrame(checks[s])
         ok = ck["passed"].all()
-        label = (
-            f"{scheduler} · all {len(ck)} checks passed"
-            if ok
-            else f"{scheduler} · review failed checks"
-        )
-        with st.expander(label, expanded=not ok):
-            ck["passed"] = ck["passed"].map({True: "Pass", False: "Review"})
+        with st.expander(f"{s}: {'all ' + str(len(ck)) + ' checks passed' if ok else 'some checks FAILED'}", expanded=not ok):
+            ck["passed"] = ck["passed"].map({True: "pass", False: "FAIL"})
             st.dataframe(ck, hide_index=True)
-
-    st.markdown("#### Built-in self-tests")
-    st.caption(
-        "These small examples check the heap, scheduling rules, context-switch accounting, idle periods, "
-        "CSV validation and safe handling of invalid ML predictions."
-    )
+    st.markdown("**Built-in self-tests.** Small hand-worked scenarios for the heap, schedulers, switching cost, idle time, "
+                "CSV validation and prediction repair.")
     if st.button("Run self-tests"):
         st.session_state["self_tests"] = run_self_tests()
     tests = st.session_state.get("self_tests")
     if tests is not None:
         n_pass = int(tests["passed"].sum())
-        (st.success if n_pass == len(tests) else st.error)(
-            f"{n_pass} of {len(tests)} self-tests passed."
-        )
+        (st.success if n_pass == len(tests) else st.error)(f"{n_pass} of {len(tests)} self-tests passed.")
         view = tests.copy()
-        view["passed"] = view["passed"].map({True: "Pass", False: "Review"})
+        view["passed"] = view["passed"].map({True: "pass", False: "FAIL"})
         st.dataframe(view, hide_index=True)
-
-# ---- How it works ---------------------------------------------------------- #
-with tab_guide:
-    st.subheader("A plain-language guide")
-    st.markdown(
-        r"""
-**What is being simulated?** Each task has an arrival time, an actual execution length, a deadline,
-a priority, a task type and an input size. Time is measured in whole virtual time units.
-
-**How do the scheduling rules choose the next task?**
-- **FIFO** runs the task that arrived first. If arrivals tie, the task ID breaks the tie.
-- **EDF** runs the ready task with the closest deadline. Priority, arrival time and task ID break ties.
-  EDF does not use ML predictions.
-- **ML-EDF** adjusts its ranking using the predicted task length and predicted deadline-miss chance.
-  A smaller score means a task is ranked sooner.
-
-**ML-EDF decision rules**
-- *Slack – risk* (the original ML-EDF formula): $\text{score} = (D_i - t - \hat{C}_i^{rem}) - w \cdot P_i$
-- *Risk-adjusted deadline*: $\text{score} = D_i - w \cdot P_i \cdot \hat{C}_i$. With $w=0$, this follows EDF.
-
-Here $\hat{C}_i$ is the estimated execution length, $\hat{C}_i^{rem}$ is estimated remaining length,
-$P_i$ is the estimated chance of a deadline miss, and $w$ is the risk weight. The slack–risk score changes
-while a task is running, so it may cause more preemptions. Context-switch time can add to the total run time.
-
-**How to read the measures**
-- A task finishing exactly at its deadline is on time; a later finish counts as a missed deadline.
-- Waiting time is turnaround time minus actual execution time. Response time is first start minus arrival.
-- Turnaround time is completion minus arrival. Tardiness is time beyond the deadline, or zero when on time.
-- CPU utilization is time spent running tasks divided by total simulation time after the first arrival.
-  Idle and context-switch time are reported separately.
-- Throughput is completed tasks per unit of simulation time.
-
-**What this app does not model**
-This is a simulator inspired by real-time operating systems. It does not run inside an RTOS and does not measure
-hardware timing. Task types are labels: IO tasks do not block, and PERIODIC tasks do not repeat. Workloads and
-ML training examples are synthetic; the classifier learns miss labels from EDF runs. ML-EDF is a project-specific
-heuristic and is not guaranteed to outperform EDF.
-"""
-    )
-

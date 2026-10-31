@@ -1001,8 +1001,10 @@ div[data-baseweb="tab-highlight"]{background:var(--ink)!important}
 [data-testid="stDataFrame"]{border:1px solid var(--line);border-radius:12px;overflow:hidden}
 
 .hero{background:linear-gradient(120deg,#0E1A44 0%,#1B2A7A 100%);border-radius:20px;padding:30px 34px 26px;margin-bottom:18px}
-.hero h1{color:#fff!important;font-size:2.15rem;line-height:1.15;margin:0 0 8px 0;max-width:720px}
-.hero p{color:#C9D3F5!important;font-size:1.02rem;line-height:1.55;margin:0 0 16px 0;max-width:680px}
+.hero h1,.hero h1 *{color:#fff!important}
+.hero h1{font-size:2.15rem;line-height:1.15;margin:0 0 8px 0;max-width:720px}
+.hero p,.hero p *{color:#C9D3F5!important}
+.hero p{font-size:1.02rem;line-height:1.55;margin:0 0 16px 0;max-width:680px}
 .pills{display:flex;flex-wrap:wrap;gap:8px}
 .pill{background:rgba(255,255,255,.12);color:#fff!important;border-radius:999px;padding:5px 12px;font-size:.82rem;font-weight:600}
 .pill.ok{background:#D6F5E6;color:#0B5D39!important}
